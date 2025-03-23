@@ -8,6 +8,9 @@ const http = require('http');
 const socketIO = require('socket.io');
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/user');
+const chatRoutes = require('./routes/chat');
+const Message = require('./models/Message');
+const User = require('./models/User');
 
 // Initialize Express app
 const app = express();
@@ -34,16 +37,29 @@ app.use((req, res, next) => {
 // Routes
 app.use('/auth', authRoutes);
 app.use('/user', userRoutes);
+app.use('/chat', chatRoutes);
 
 // Track users in rooms
 const rooms = {};
+const userSocketMap = {}; // Maps socketId to userId (when authenticated)
 
-// Socket.io for WebRTC signaling
+// Socket.io for WebRTC signaling and chat
 io.on('connection', socket => {
   console.log('User connected:', socket.id);
   
+  // Store user identity when authenticated
+  socket.on('authenticate', async (userData) => {
+    try {
+      const { userId, userName } = userData;
+      userSocketMap[socket.id] = { userId, userName };
+      console.log(`Socket ${socket.id} authenticated as user ${userName} (${userId})`);
+    } catch (error) {
+      console.error('Authentication error:', error);
+    }
+  });
+  
   // Join a room
-  socket.on('join-room', roomId => {
+  socket.on('join-room', async (roomId) => {
     // Leave any previous room
     if (socket.roomId) {
       leaveRoom(socket);
@@ -72,11 +88,74 @@ io.on('connection', socket => {
     socket.to(roomId).emit('user-connected', socket.id);
     
     console.log(`User ${socket.id} joined room ${roomId}, current users:`, rooms[roomId]);
+    
+    // Create and broadcast a system message for user join
+    if (userSocketMap[socket.id]) {
+      try {
+        const { userName, userId } = userSocketMap[socket.id];
+        
+        const systemMessage = new Message({
+          roomId,
+          senderId: userId,
+          senderName: 'System',
+          content: `${userName} has joined the room.`,
+          system: true
+        });
+        
+        await systemMessage.save();
+        
+        // Broadcast to all users in the room including sender
+        io.to(roomId).emit('chat-message', {
+          ...systemMessage.toObject(),
+          createdAt: new Date()
+        });
+      } catch (error) {
+        console.error('Error creating system message:', error);
+      }
+    }
+  });
+  
+  // Handle chat messages
+  socket.on('send-message', async (messageData) => {
+    try {
+      const { roomId, content } = messageData;
+      
+      if (!socket.roomId || socket.roomId !== roomId) {
+        console.error('Error: Socket not in the specified room');
+        return;
+      }
+      
+      if (!userSocketMap[socket.id]) {
+        console.error('Error: Unauthenticated user cannot send messages');
+        return;
+      }
+      
+      const { userId, userName } = userSocketMap[socket.id];
+      
+      // Create and save message to MongoDB
+      const message = new Message({
+        roomId,
+        senderId: userId,
+        senderName: userName,
+        content,
+        system: false
+      });
+      
+      await message.save();
+      
+      // Broadcast to all users in the room including sender
+      io.to(roomId).emit('chat-message', message.toObject());
+      
+      console.log(`Message from ${userName} in room ${roomId}: ${content}`);
+    } catch (error) {
+      console.error('Error sending chat message:', error);
+      socket.emit('chat-error', { message: 'Failed to send message' });
+    }
   });
   
   // Leave a room
-  socket.on('leave-room', () => {
-    leaveRoom(socket);
+  socket.on('leave-room', async () => {
+    await leaveRoom(socket);
   });
   
   // Handle WebRTC signaling
@@ -95,15 +174,43 @@ io.on('connection', socket => {
   });
   
   // Handle disconnection
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log('User disconnected:', socket.id);
-    leaveRoom(socket);
+    await leaveRoom(socket);
+    
+    // Remove from user socket map
+    delete userSocketMap[socket.id];
   });
   
   // Helper function to handle room leaving logic
-  function leaveRoom(socket) {
+  async function leaveRoom(socket) {
     const roomId = socket.roomId;
     if (roomId && rooms[roomId]) {
+      // Create and broadcast a system message for user leave
+      if (userSocketMap[socket.id]) {
+        try {
+          const { userName, userId } = userSocketMap[socket.id];
+          
+          const systemMessage = new Message({
+            roomId,
+            senderId: userId,
+            senderName: 'System',
+            content: `${userName} has left the room.`,
+            system: true
+          });
+          
+          await systemMessage.save();
+          
+          // Broadcast to all users in the room
+          socket.to(roomId).emit('chat-message', {
+            ...systemMessage.toObject(),
+            createdAt: new Date()
+          });
+        } catch (error) {
+          console.error('Error creating system message:', error);
+        }
+      }
+      
       // Remove user from room
       rooms[roomId] = rooms[roomId].filter(id => id !== socket.id);
       

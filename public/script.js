@@ -8,6 +8,9 @@ let currentRoom = null;
 let isMuted = false;
 let isVideoOff = false;
 let isScreenSharing = false;
+let currentUser = null;
+let isLoadingHistory = false;
+let lastMessageTime = null;
 
 // DOM elements
 const heroSection = document.getElementById('heroSection');
@@ -32,6 +35,14 @@ const screenShareToggle = document.getElementById('screenShareToggle');
 const endCallBtn = document.getElementById('endCallBtn');
 const copyRoomId = document.getElementById('copyRoomId');
 const notificationContainer = document.getElementById('notificationContainer');
+const chatPanel = document.getElementById('chatPanel');
+const chatMessages = document.getElementById('chatMessages');
+const chatForm = document.getElementById('chatForm');
+const chatInput = document.getElementById('chatInput');
+const sendMessageBtn = document.getElementById('sendMessageBtn');
+const toggleChatBtn = document.getElementById('toggleChatBtn');
+const messageTemplate = document.getElementById('message-template');
+const systemMessageTemplate = document.getElementById('system-message-template');
 
 // Initialize animations when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
@@ -213,8 +224,8 @@ document.getElementById('showSignup').addEventListener('click', (e) => {
     y: -20,
     duration: 0.3,
     onComplete: () => {
-      loginForm.classList.add('hidden');
-      signupForm.classList.remove('hidden');
+  loginForm.classList.add('hidden');
+  signupForm.classList.remove('hidden');
       gsap.fromTo(signupForm, 
         { opacity: 0, y: 20 }, 
         { opacity: 1, y: 0, duration: 0.5 }
@@ -231,8 +242,8 @@ document.getElementById('showLogin').addEventListener('click', (e) => {
     y: -20,
     duration: 0.3,
     onComplete: () => {
-      signupForm.classList.add('hidden');
-      loginForm.classList.remove('hidden');
+  signupForm.classList.add('hidden');
+  loginForm.classList.remove('hidden');
       gsap.fromTo(loginForm, 
         { opacity: 0, y: 20 }, 
         { opacity: 1, y: 0, duration: 0.5 }
@@ -284,9 +295,9 @@ document.getElementById('signupButton').addEventListener('click', async () => {
       y: -20,
       duration: 0.3,
       onComplete: () => {
-        signupForm.classList.add('hidden');
-        loginForm.classList.remove('hidden');
-        document.getElementById('loginEmail').value = email;
+    signupForm.classList.add('hidden');
+    loginForm.classList.remove('hidden');
+    document.getElementById('loginEmail').value = email;
         gsap.fromTo(loginForm, 
           { opacity: 0, y: 20 }, 
           { opacity: 1, y: 0, duration: 0.5 }
@@ -329,8 +340,10 @@ document.getElementById('loginButton').addEventListener('click', async () => {
     // Store token and user ID in localStorage for persistence
     token = data.token;
     userId = data.userId;
+    currentUser = { userId: data.userId, name: data.name || email.split('@')[0] };
     localStorage.setItem('token', token);
     localStorage.setItem('userId', userId);
+    localStorage.setItem('userName', currentUser.name);
     
     // Show call section with animation
     showCallSection();
@@ -420,6 +433,14 @@ async function initWebRTC() {
     // Connect to socket.io server
     socket = io();
     
+    // Authenticate socket with user information
+    if (userId) {
+      socket.emit('authenticate', {
+        userId,
+        userName: localStorage.getItem('userName') || 'User'
+      });
+    }
+    
     // Get local media stream
     localStream = await navigator.mediaDevices.getUserMedia({ 
       video: true, 
@@ -450,18 +471,18 @@ async function initWebRTC() {
     
     socket.on('offer', async (offer, fromUserId) => {
       try {
-        console.log('Received offer from:', fromUserId);
+      console.log('Received offer from:', fromUserId);
         if (!peerConnections[fromUserId]) {
           await createPeerConnection(fromUserId, false);
         }
         
         const pc = peerConnections[fromUserId];
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
         
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
         
-        socket.emit('answer', answer, currentRoom, fromUserId);
+      socket.emit('answer', answer, currentRoom, fromUserId);
         console.log('Sent answer to:', fromUserId);
       } catch (error) {
         console.error('Error handling offer:', error);
@@ -471,7 +492,7 @@ async function initWebRTC() {
     
     socket.on('answer', async (answer, fromUserId) => {
       try {
-        console.log('Received answer from:', fromUserId);
+      console.log('Received answer from:', fromUserId);
         if (peerConnections[fromUserId]) {
           await peerConnections[fromUserId].setRemoteDescription(new RTCSessionDescription(answer));
           console.log('Set remote description for:', fromUserId);
@@ -484,7 +505,7 @@ async function initWebRTC() {
     
     socket.on('ice-candidate', async (candidate, fromUserId) => {
       try {
-        console.log('Received ICE candidate from:', fromUserId);
+      console.log('Received ICE candidate from:', fromUserId);
         if (peerConnections[fromUserId]) {
           await peerConnections[fromUserId].addIceCandidate(new RTCIceCandidate(candidate));
           console.log('Added ICE candidate for:', fromUserId);
@@ -492,6 +513,15 @@ async function initWebRTC() {
       } catch (error) {
         console.error('Error adding ICE candidate:', error);
       }
+    });
+    
+    // Chat message events
+    socket.on('chat-message', message => {
+      addMessageToChat(message);
+    });
+    
+    socket.on('chat-error', error => {
+      showNotification(error.message, 'error');
     });
     
     // Set up room controls
@@ -532,6 +562,9 @@ async function initWebRTC() {
           showNotification('Failed to copy room ID', 'error');
         });
     });
+    
+    // Set up chat controls
+    setupChatUI();
   } catch (error) {
     console.error('WebRTC initialization error:', error);
     showNotification('Failed to access camera and microphone', 'error');
@@ -545,8 +578,8 @@ async function createPeerConnection(remoteUserId, isInitiator) {
     
     // More comprehensive ICE servers configuration
     const iceServers = {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
         { urls: 'stun:stun3.l.google.com:19302' },
@@ -572,8 +605,8 @@ async function createPeerConnection(remoteUserId, isInitiator) {
     };
     
     // Add local tracks to the connection
-    localStream.getTracks().forEach(track => {
-      pc.addTrack(track, localStream);
+  localStream.getTracks().forEach(track => {
+    pc.addTrack(track, localStream);
       console.log(`Added local ${track.kind} track to peer connection`);
     });
     
@@ -630,16 +663,16 @@ async function createPeerConnection(remoteUserId, isInitiator) {
           offerToReceiveVideo: true
         });
         
-        await pc.setLocalDescription(offer);
+      await pc.setLocalDescription(offer);
         console.log(`Sending offer to ${remoteUserId}`);
         socket.emit('offer', offer, currentRoom, remoteUserId);
-      } catch (error) {
-        console.error('Error creating offer:', error);
+    } catch (error) {
+      console.error('Error creating offer:', error);
         showNotification('Error establishing connection', 'error');
-      }
     }
-    
-    return pc;
+  }
+  
+  return pc;
   } catch (error) {
     console.error('Error creating peer connection:', error);
     showNotification('Error connecting to remote user', 'error');
@@ -714,6 +747,10 @@ function joinRoom(roomId) {
     { opacity: 1, y: 0, duration: 0.5, ease: 'power2.out' }
   );
   
+  // Clear chat and load message history
+  clearChat();
+  loadChatHistory(roomId);
+  
   showNotification(`Joined room: ${roomId}`, 'success');
 }
 
@@ -722,21 +759,21 @@ function leaveRoom() {
   if (currentRoom) {
     console.log(`Leaving room: ${currentRoom}`);
     socket.emit('leave-room', currentRoom);
-    
-    // Close all peer connections
-    Object.keys(peerConnections).forEach(userId => {
-      closePeerConnection(userId);
-    });
+  
+  // Close all peer connections
+  Object.keys(peerConnections).forEach(userId => {
+    closePeerConnection(userId);
+  });
     
     // Reset screen sharing if active
     if (isScreenSharing) {
       stopScreenSharing();
     }
-    
-    // Update UI
+  
+  // Update UI
     currentRoom = null;
-    roomInfo.classList.add('hidden');
-    leaveRoomButton.classList.add('hidden');
+  roomInfo.classList.add('hidden');
+  leaveRoomButton.classList.add('hidden');
     
     // Clear remote videos container
     while (remoteVideos.firstChild) {
@@ -922,4 +959,225 @@ async function stopScreenSharing() {
       console.error('Critical error recovering from screen share:', fallbackError);
     }
   }
+}
+
+// Setup chat UI and events
+function setupChatUI() {
+  // Send message on form submit
+  chatForm.addEventListener('submit', e => {
+    e.preventDefault();
+    sendChatMessage();
+  });
+  
+  // Toggle chat panel on mobile
+  toggleChatBtn.addEventListener('click', () => {
+    const chatMessages = document.getElementById('chatMessages');
+    const chatForm = document.querySelector('#chatPanel form');
+    
+    if (chatMessages.classList.contains('hidden')) {
+      // Show chat
+      gsap.to(chatMessages, { 
+        height: 'auto', 
+        opacity: 1, 
+        duration: 0.3,
+        display: 'block',
+        onStart: () => chatMessages.classList.remove('hidden')
+      });
+      gsap.to(chatForm, { 
+        height: 'auto', 
+        opacity: 1, 
+        duration: 0.3,
+        display: 'flex',
+        onStart: () => chatForm.classList.remove('hidden')
+      });
+      toggleChatBtn.innerHTML = '<i class="fas fa-chevron-up"></i>';
+    } else {
+      // Hide chat
+      gsap.to(chatMessages, { 
+        height: 0, 
+        opacity: 0, 
+        duration: 0.3,
+        onComplete: () => chatMessages.classList.add('hidden')
+      });
+      gsap.to(chatForm, { 
+        height: 0, 
+        opacity: 0, 
+        duration: 0.3,
+        onComplete: () => chatForm.classList.add('hidden')
+      });
+      toggleChatBtn.innerHTML = '<i class="fas fa-chevron-down"></i>';
+    }
+  });
+  
+  // Load more messages when scrolling to top
+  chatMessages.addEventListener('scroll', () => {
+    if (chatMessages.scrollTop === 0 && !isLoadingHistory && currentRoom) {
+      if (lastMessageTime) {
+        loadChatHistory(currentRoom, lastMessageTime);
+      }
+    }
+  });
+}
+
+// Send a chat message
+function sendChatMessage() {
+  const content = chatInput.value.trim();
+  
+  if (!content || !currentRoom) {
+    return;
+  }
+  
+  // Send message via socket.io
+  socket.emit('send-message', {
+    roomId: currentRoom,
+    content
+  });
+  
+  // Clear input
+  chatInput.value = '';
+  chatInput.focus();
+}
+
+// Load chat history for a room
+async function loadChatHistory(roomId, before = null) {
+  if (!token || isLoadingHistory) return;
+  
+  try {
+    isLoadingHistory = true;
+    
+    // Show loading indicator
+    const loadingIndicator = document.createElement('div');
+    loadingIndicator.className = 'text-center text-gray-400 text-xs py-2';
+    loadingIndicator.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-2"></i> Loading messages...';
+    
+    if (before) {
+      chatMessages.insertBefore(loadingIndicator, chatMessages.firstChild);
+    } else {
+      chatMessages.appendChild(loadingIndicator);
+    }
+    
+    // Build query URL
+    let url = `/chat/room/${roomId}?limit=20`;
+    if (before) {
+      url += `&before=${before}`;
+    }
+    
+    // Fetch messages
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to load chat history');
+    }
+    
+    const data = await response.json();
+    
+    // Remove loading indicator
+    loadingIndicator.remove();
+    
+    if (data.messages.length > 0) {
+      // Keep track of the oldest message time for pagination
+      lastMessageTime = data.messages[0].createdAt;
+      
+      // Get the scrollHeight before adding messages
+      const prevScrollHeight = chatMessages.scrollHeight;
+      
+      // Add messages to chat
+      data.messages.forEach(message => {
+        addMessageToChat(message, before ? 'prepend' : 'append');
+      });
+      
+      // If loading older messages, maintain scroll position
+      if (before) {
+        chatMessages.scrollTop = chatMessages.scrollHeight - prevScrollHeight;
+      } else {
+        // Scroll to bottom for new messages
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+      }
+    }
+  } catch (error) {
+    console.error('Error loading chat history:', error);
+    showNotification('Failed to load chat history', 'error');
+  } finally {
+    isLoadingHistory = false;
+  }
+}
+
+// Add a message to the chat
+function addMessageToChat(message, position = 'append') {
+  const isSystem = message.system;
+  const isOutgoing = message.senderId === userId;
+  const template = isSystem ? systemMessageTemplate : messageTemplate;
+  
+  // Clone template
+  const messageEl = document.importNode(template.content, true).firstElementChild;
+  
+  if (isSystem) {
+    // System message
+    messageEl.querySelector('.system-content').textContent = message.content;
+    messageEl.querySelector('.system-time').textContent = formatMessageTime(message.createdAt);
+  } else {
+    // Regular message
+    messageEl.classList.add(isOutgoing ? 'outgoing' : 'incoming');
+    messageEl.querySelector('.message-sender').textContent = message.senderName;
+    messageEl.querySelector('.message-time').textContent = formatMessageTime(message.createdAt);
+    messageEl.querySelector('.message-content').textContent = message.content;
+    
+    // Apply appropriate styling
+    if (isOutgoing) {
+      messageEl.querySelector('.message-bubble').classList.add('bg-primary');
+    } else {
+      messageEl.querySelector('.message-bubble').classList.add('bg-white/10');
+    }
+  }
+  
+  // Add animation class
+  messageEl.classList.add('message-new');
+  
+  // Add to chat
+  if (position === 'prepend') {
+    chatMessages.insertBefore(messageEl, chatMessages.firstChild);
+  } else {
+    chatMessages.appendChild(messageEl);
+    
+    // Scroll to bottom for new messages
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+}
+
+// Format message timestamp
+function formatMessageTime(timestamp) {
+  const date = new Date(timestamp);
+  const now = new Date();
+  
+  // Today, show just time
+  if (date.toDateString() === now.toDateString()) {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  
+  // Yesterday
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) {
+    return `Yesterday ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  }
+  
+  // Other dates
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' }) + 
+    ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Clear chat messages
+function clearChat() {
+  // Keep only the welcome message
+  const welcomeMessage = chatMessages.querySelector('.chat-welcome');
+  chatMessages.innerHTML = '';
+  if (welcomeMessage) {
+    chatMessages.appendChild(welcomeMessage);
+  }
+  
+  lastMessageTime = null;
 }
